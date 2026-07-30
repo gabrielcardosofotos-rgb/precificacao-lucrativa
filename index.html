@@ -343,7 +343,12 @@ function calcFabricacao(prod) {
     return s + custoUnitInsumo(ins) * Number(ing.qtd || 0);
   }, 0);
   const rendimento = Math.max(1, Number(prod.rendimento || 1));
-  const subtotal = subtotalReceita / rendimento; // custo de insumos por unidade
+  const custoBase = subtotalReceita / rendimento; // custo de insumos da receita, por unidade
+  const custoAdicionais = (prod.adicionais || []).reduce((s, ad) => {
+    const ins = insumoById(ad.insumoId);
+    return s + custoUnitInsumo(ins) * Number(ad.qtd || 0);
+  }, 0); // já é por unidade, não divide pelo rendimento
+  const subtotal = custoBase + custoAdicionais;
   const rt = rateio();
   const custoTotal = subtotal + rt;
   const tax = totalTaxas();
@@ -354,7 +359,7 @@ function calcFabricacao(prod) {
   const lucroUnit = atual - custoTotal - atual * tax;
   const custoVariavel = subtotal;
   const margemContrib = atual - custoVariavel - atual * tax;
-  return { subtotalReceita, rendimento, subtotal, rateio: rt, custoTotal, precoIdeal, resultado, lucroUnit, margemContrib,
+  return { subtotalReceita, rendimento, custoBase, custoAdicionais, subtotal, rateio: rt, custoTotal, precoIdeal, resultado, lucroUnit, margemContrib,
            status: atual >= precoIdeal ? 'ok' : 'bad' };
 }
 function calcRevenda(prod) {
@@ -540,7 +545,10 @@ function productCard(p, calc, tipo) {
           <div class="name">${esc(p.nome)}</div>
           <div class="meta">${metaLine}</div>
         </div>
-        <button class="icon-btn btn-del" data-kind="${tipo}" data-id="${p.id}" aria-label="Excluir">${trashIcon()}</button>
+        <div style="display:flex; gap:6px; flex-shrink:0;">
+          <button class="icon-btn btn-dup" data-kind="${tipo}" data-id="${p.id}" aria-label="Duplicar">${dupIcon()}</button>
+          <button class="icon-btn btn-del" data-kind="${tipo}" data-id="${p.id}" aria-label="Excluir">${trashIcon()}</button>
+        </div>
       </div>
       <div class="row-between" style="width:100%">
         <span class="stamp ${calc.status}">${calc.status === 'ok' ? 'Dentro da margem' : 'Ajustar preço'}</span>
@@ -555,6 +563,9 @@ function emptyRow(msg) { return `<p class="helper-note">${msg}</p>`; }
 function trashIcon() {
   return `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2m2 0-1 13a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 7"/></svg>`;
 }
+function dupIcon() {
+  return `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>`;
+}
 
 /* ---------------- eventos de lista ---------------- */
 function attachListEvents() {
@@ -563,6 +574,13 @@ function attachListEvents() {
       e.stopPropagation();
       const { kind, id } = btn.dataset;
       confirmDelete(kind, id);
+    });
+  });
+  document.querySelectorAll('.btn-dup').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const { kind, id } = btn.dataset;
+      duplicateProduto(kind, id);
     });
   });
   document.querySelectorAll('.item[data-kind]').forEach(el => {
@@ -577,6 +595,21 @@ function attachListEvents() {
   });
   const inpProd = document.getElementById('inp-producao');
   if (inpProd) inpProd.addEventListener('input', e => { state.producaoMensal = Number(e.target.value || 0); saveState(); render(); });
+}
+function duplicateProduto(kind, id) {
+  const list = kind === 'fab' ? state.fabricacao : state.revenda;
+  const original = list.find(x => x.id === id);
+  if (!original) return;
+  const copy = structuredClone(original);
+  copy.id = uid();
+  copy.nome = original.nome + ' (cópia)';
+  if (kind === 'fab') {
+    copy.ingredientes = (copy.ingredientes || []).map(ing => ({ ...ing }));
+    copy.adicionais = (copy.adicionais || []).map(ad => ({ ...ad }));
+  }
+  list.push(copy);
+  saveState(); render();
+  openProdutoSheet(kind, copy.id);
 }
 function confirmDelete(kind, id) {
   const map = {
@@ -661,9 +694,10 @@ function openProdutoSheet(tipo, id) {
   const list = isFab ? state.fabricacao : state.revenda;
   const item = id ? list.find(x => x.id === id) : null;
   const draft = item ? structuredClone(item) : (isFab
-    ? { id: uid(), nome: '', precoAtual: 0, margem: 0.3, rendimento: 1, ingredientes: [] }
+    ? { id: uid(), nome: '', precoAtual: 0, margem: 0.3, rendimento: 1, ingredientes: [], adicionais: [] }
     : { id: uid(), nome: '', custoCompra: 0, margem: 0.3, precoAtual: 0 });
   if (isFab && !draft.rendimento) draft.rendimento = 1;
+  if (isFab && !draft.adicionais) draft.adicionais = [];
 
   function ingredientsHtml() {
     return draft.ingredientes.map((ing, idx) => `
@@ -676,13 +710,25 @@ function openProdutoSheet(tipo, id) {
       </div>`).join('');
   }
 
+  function adicionaisHtml() {
+    return draft.adicionais.map((ad, idx) => `
+      <div class="ing-row" data-idx="${idx}">
+        <select class="ad-select">
+          ${state.insumos.map(i => `<option value="${i.id}" ${i.id === ad.insumoId ? 'selected' : ''}>${esc(i.nome)}</option>`).join('')}
+        </select>
+        <input class="ad-qtd" type="number" step="0.001" inputmode="decimal" value="${ad.qtd}" placeholder="Qtd/un.">
+        <button class="ad-remove" data-idx="${idx}">×</button>
+      </div>`).join('');
+  }
+
   function summaryHtml() {
     if (!state.insumos.length && isFab) return `<p class="helper-note">Cadastre insumos primeiro para montar a ficha técnica.</p>`;
     const calc = isFab ? calcFabricacao(draft) : calcRevenda(draft);
     const rows = isFab ? [
       ['Custo de insumos (receita toda)', fmtR(calc.subtotalReceita)],
       [`Rendimento: ${calc.rendimento} unidade${calc.rendimento > 1 ? 's' : ''}`, `÷ ${calc.rendimento}`],
-      ['Custo de insumos por unidade', fmtR(calc.subtotal)],
+      ['Custo da receita por unidade', fmtR(calc.custoBase)],
+      ...(draft.adicionais.length ? [['Adicionais por unidade', '+ ' + fmtR(calc.custoAdicionais)]] : []),
       ['Rateio de custos fixos (por un.)', fmtR(calc.rateio)],
       ['Custo total de produção (por un.)', fmtR(calc.custoTotal)],
     ] : [
@@ -714,6 +760,10 @@ function openProdutoSheet(tipo, id) {
         <button class="add-ing-btn" id="btn-add-ing">+ adicionar insumo</button>
         <div class="field"><label>Rendimento da receita (quantas unidades essa forma rende?)</label>
           <input id="f-rendimento" type="number" step="1" min="1" inputmode="numeric" value="${draft.rendimento}" placeholder="Ex: 12 fatias"></div>
+
+        <p class="section-title">Adicionais por unidade (aplicado em cada fatia, não na forma toda)</p>
+        <div id="ad-list">${adicionaisHtml()}</div>
+        <button class="add-ing-btn" id="btn-add-ad">+ adicionar adicional</button>
       ` : `
         <div class="field"><label>Custo de compra (R$)</label><input id="f-custo" type="number" step="0.01" inputmode="decimal" value="${draft.custoCompra}"></div>
       `}
@@ -743,8 +793,14 @@ function openProdutoSheet(tipo, id) {
         draft.ingredientes.push({ insumoId: state.insumos[0].id, qtd: 0 });
         rerenderIngredients();
       };
+      document.getElementById('btn-add-ad').onclick = () => {
+        if (!state.insumos.length) { alert('Cadastre um insumo primeiro, na aba Insumos.'); return; }
+        draft.adicionais.push({ insumoId: state.insumos[0].id, qtd: 0 });
+        rerenderAdicionais();
+      };
       document.getElementById('f-rendimento').oninput = e => { draft.rendimento = Math.max(1, Number(e.target.value || 1)); refreshSummary(); };
       wireIngredientRows();
+      wireAdicionalRows();
     } else {
       document.getElementById('f-custo').oninput = e => { draft.custoCompra = Number(e.target.value || 0); refreshSummary(); };
     }
@@ -768,6 +824,22 @@ function openProdutoSheet(tipo, id) {
   function rerenderIngredients() {
     document.getElementById('ing-list').innerHTML = ingredientsHtml();
     wireIngredientRows();
+    refreshSummary();
+  }
+  function wireAdicionalRows() {
+    document.querySelectorAll('.ad-select').forEach((sel, idx) => {
+      sel.onchange = e => { draft.adicionais[idx].insumoId = e.target.value; refreshSummary(); };
+    });
+    document.querySelectorAll('.ad-qtd').forEach((inp, idx) => {
+      inp.oninput = e => { draft.adicionais[idx].qtd = Number(e.target.value || 0); refreshSummary(); };
+    });
+    document.querySelectorAll('.ad-remove').forEach(btn => {
+      btn.onclick = () => { draft.adicionais.splice(Number(btn.dataset.idx), 1); rerenderAdicionais(); };
+    });
+  }
+  function rerenderAdicionais() {
+    document.getElementById('ad-list').innerHTML = adicionaisHtml();
+    wireAdicionalRows();
     refreshSummary();
   }
   function refreshSummary() {
