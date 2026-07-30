@@ -338,21 +338,23 @@ function custoUnitInsumo(insumo) {
 }
 
 function calcFabricacao(prod) {
-  const subtotal = prod.ingredientes.reduce((s, ing) => {
+  const subtotalReceita = prod.ingredientes.reduce((s, ing) => {
     const ins = insumoById(ing.insumoId);
     return s + custoUnitInsumo(ins) * Number(ing.qtd || 0);
   }, 0);
+  const rendimento = Math.max(1, Number(prod.rendimento || 1));
+  const subtotal = subtotalReceita / rendimento; // custo de insumos por unidade
   const rt = rateio();
   const custoTotal = subtotal + rt;
   const tax = totalTaxas();
   const denom = 1 - Number(prod.margem || 0) - tax;
   const precoIdeal = denom > 0 ? custoTotal / denom : 0;
   const atual = Number(prod.precoAtual || 0);
-  const resultado = atual - precoIdeal;
+  const resultado = atual - custoTotal; // resultado (atual vs. custo total de produção)
   const lucroUnit = atual - custoTotal - atual * tax;
   const custoVariavel = subtotal;
   const margemContrib = atual - custoVariavel - atual * tax;
-  return { subtotal, rateio: rt, custoTotal, precoIdeal, resultado, lucroUnit, margemContrib,
+  return { subtotalReceita, rendimento, subtotal, rateio: rt, custoTotal, precoIdeal, resultado, lucroUnit, margemContrib,
            status: atual >= precoIdeal ? 'ok' : 'bad' };
 }
 function calcRevenda(prod) {
@@ -528,18 +530,21 @@ function renderRevenda() {
   return state.revenda.map(p => productCard(p, calcRevenda(p), 'rev')).join('');
 }
 function productCard(p, calc, tipo) {
+  const metaLine = tipo === 'fab'
+    ? `Atual ${fmtR(p.precoAtual)} · Custo ${fmtR(calc.custoTotal)}${calc.rendimento > 1 ? ` (rende ${calc.rendimento})` : ''}`
+    : `Atual ${fmtR(p.precoAtual)} · Ideal ${fmtR(calc.precoIdeal)}`;
   return `
     <div class="item" data-kind="${tipo}" data-id="${p.id}" style="align-items:flex-start; flex-direction:column; gap:8px;">
       <div class="row-between" style="width:100%">
         <div class="info">
           <div class="name">${esc(p.nome)}</div>
-          <div class="meta">Atual ${fmtR(p.precoAtual)} · Ideal ${fmtR(calc.precoIdeal)}</div>
+          <div class="meta">${metaLine}</div>
         </div>
         <button class="icon-btn btn-del" data-kind="${tipo}" data-id="${p.id}" aria-label="Excluir">${trashIcon()}</button>
       </div>
       <div class="row-between" style="width:100%">
         <span class="stamp ${calc.status}">${calc.status === 'ok' ? 'Dentro da margem' : 'Ajustar preço'}</span>
-        <span class="price">${calc.resultado >= 0 ? '▲ ' : '▼ '}${fmtR(Math.abs(calc.resultado))}</span>
+        <span class="price">${tipo === 'fab' ? 'Lucro ' : ''}${calc.resultado >= 0 ? '▲ ' : '▼ '}${fmtR(Math.abs(calc.resultado))}</span>
       </div>
     </div>`;
 }
@@ -656,8 +661,9 @@ function openProdutoSheet(tipo, id) {
   const list = isFab ? state.fabricacao : state.revenda;
   const item = id ? list.find(x => x.id === id) : null;
   const draft = item ? structuredClone(item) : (isFab
-    ? { id: uid(), nome: '', precoAtual: 0, margem: 0.3, ingredientes: [] }
+    ? { id: uid(), nome: '', precoAtual: 0, margem: 0.3, rendimento: 1, ingredientes: [] }
     : { id: uid(), nome: '', custoCompra: 0, margem: 0.3, precoAtual: 0 });
+  if (isFab && !draft.rendimento) draft.rendimento = 1;
 
   function ingredientsHtml() {
     return draft.ingredientes.map((ing, idx) => `
@@ -674,18 +680,21 @@ function openProdutoSheet(tipo, id) {
     if (!state.insumos.length && isFab) return `<p class="helper-note">Cadastre insumos primeiro para montar a ficha técnica.</p>`;
     const calc = isFab ? calcFabricacao(draft) : calcRevenda(draft);
     const rows = isFab ? [
-      ['Subtotal de insumos', fmtR(calc.subtotal)],
-      ['Rateio de custos fixos', fmtR(calc.rateio)],
-      ['Custo total de produção', fmtR(calc.custoTotal)],
+      ['Custo de insumos (receita toda)', fmtR(calc.subtotalReceita)],
+      [`Rendimento: ${calc.rendimento} unidade${calc.rendimento > 1 ? 's' : ''}`, `÷ ${calc.rendimento}`],
+      ['Custo de insumos por unidade', fmtR(calc.subtotal)],
+      ['Rateio de custos fixos (por un.)', fmtR(calc.rateio)],
+      ['Custo total de produção (por un.)', fmtR(calc.custoTotal)],
     ] : [
       ['Rateio de custos fixos', fmtR(calc.rateio ?? rateio())],
       ['Custo total', fmtR(calc.custoTotal)],
     ];
+    const resultLabel = isFab ? 'Resultado (atual vs. custo total)' : 'Resultado (atual vs. ideal)';
     return `
       <div class="live-summary">
         ${rows.map(([l, v]) => `<div class="lrow"><span>${l}</span><span>${v}</span></div>`).join('')}
         <div class="lrow total"><span>Preço ideal de venda</span><span>${fmtR(calc.precoIdeal)}</span></div>
-        <div class="lrow"><span>Resultado (atual vs. ideal)</span>
+        <div class="lrow"><span>${resultLabel}</span>
           <span style="color:${calc.resultado >= 0 ? 'var(--success)' : 'var(--danger)'}">${calc.resultado >= 0 ? '▲' : '▼'} ${fmtR(Math.abs(calc.resultado))}</span></div>
       </div>
       <div style="text-align:center; margin-bottom:14px;">
@@ -700,9 +709,11 @@ function openProdutoSheet(tipo, id) {
       <div class="field"><label>Nome do produto</label><input id="f-nome" value="${esc(draft.nome)}" placeholder="Ex: Cookie Bar Tradicional"></div>
 
       ${isFab ? `
-        <p class="section-title" style="margin-top:6px">Ingredientes</p>
+        <p class="section-title" style="margin-top:6px">Ingredientes (quantidades da receita inteira)</p>
         <div id="ing-list">${ingredientsHtml()}</div>
         <button class="add-ing-btn" id="btn-add-ing">+ adicionar insumo</button>
+        <div class="field"><label>Rendimento da receita (quantas unidades essa forma rende?)</label>
+          <input id="f-rendimento" type="number" step="1" min="1" inputmode="numeric" value="${draft.rendimento}" placeholder="Ex: 12 fatias"></div>
       ` : `
         <div class="field"><label>Custo de compra (R$)</label><input id="f-custo" type="number" step="0.01" inputmode="decimal" value="${draft.custoCompra}"></div>
       `}
@@ -732,6 +743,7 @@ function openProdutoSheet(tipo, id) {
         draft.ingredientes.push({ insumoId: state.insumos[0].id, qtd: 0 });
         rerenderIngredients();
       };
+      document.getElementById('f-rendimento').oninput = e => { draft.rendimento = Math.max(1, Number(e.target.value || 1)); refreshSummary(); };
       wireIngredientRows();
     } else {
       document.getElementById('f-custo').oninput = e => { draft.custoCompra = Number(e.target.value || 0); refreshSummary(); };
