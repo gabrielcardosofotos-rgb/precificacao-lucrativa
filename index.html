@@ -128,6 +128,29 @@
   .empty .display{font-size:19px; color:var(--ink); margin-bottom:6px;}
   .empty p{font-size:13px; margin:0;}
 
+  .reorder-col{display:flex; flex-direction:column; gap:2px; flex-shrink:0;}
+  .reorder-btn{
+    width:22px; height:19px; border-radius:5px; border:1px solid var(--line);
+    background:#fff; color:var(--ink-soft); font-size:9px; cursor:pointer; display:flex;
+    align-items:center; justify-content:center; padding:0; line-height:1;
+  }
+  .reorder-btn:disabled{opacity:.25; cursor:default;}
+  .cat-heading{
+    font-size:12.5px; font-weight:700; color:var(--primary); margin:18px 2px 8px;
+    padding-bottom:5px; border-bottom:2px solid var(--gold-soft);
+  }
+  .cat-manage-btn{
+    background:var(--surface); border:1px solid var(--line); border-radius:20px;
+    padding:6px 12px; font-size:12px; font-weight:600; color:var(--primary); cursor:pointer;
+  }
+  .cat-row{
+    display:flex; align-items:center; gap:8px; padding:10px 0; border-bottom:1px solid var(--line);
+  }
+  .cat-row:last-child{border-bottom:none;}
+  .cat-row .cat-name{flex:1; font-size:14px; font-weight:600; min-width:0;}
+  .cat-row .reorder-col{flex-direction:row;}
+  .cat-row .reorder-btn{width:26px; height:24px; font-size:10px;}
+
   /* Stamp badge (signature element) */
   .stamp{
     display:inline-flex; align-items:center; justify-content:center;
@@ -307,6 +330,7 @@ const DEFAULT_STATE = {
   ],
   fabricacao: [],
   revenda: [],
+  categoriasProducao: [],
 };
 
 let state = loadState();
@@ -527,8 +551,28 @@ function renderInsumos() {
 
 /* ---------------- Produção ---------------- */
 function renderProducao() {
-  if (!state.fabricacao.length) return emptyState('Nenhum produto de fabricação', 'Toque no + para montar a primeira ficha técnica.');
-  return state.fabricacao.map(p => productCard(p, calcFabricacao(p), 'fab')).join('');
+  const catBar = `
+    <div class="row-between" style="margin:2px 0 14px;">
+      <p class="section-title" style="margin:0">Suas fichas técnicas</p>
+      <button class="cat-manage-btn" id="btn-manage-cat">🗂 Categorias</button>
+    </div>`;
+  if (!state.fabricacao.length) return catBar + emptyState('Nenhum produto de fabricação', 'Toque no + para montar a primeira ficha técnica.');
+
+  const cats = state.categoriasProducao;
+  if (!cats.length) {
+    // sem categorias criadas: lista simples, mas já com reorder (todos no mesmo grupo "null")
+    return catBar + state.fabricacao.map(p => productCard(p, calcFabricacao(p), 'fab')).join('');
+  }
+
+  const groups = [...cats.map(c => ({ id: c.id, nome: c.nome })), { id: null, nome: 'Sem categoria' }];
+  let html = catBar;
+  groups.forEach(g => {
+    const items = state.fabricacao.filter(p => (p.categoriaId || null) === g.id);
+    if (!items.length) return;
+    html += `<p class="cat-heading">${esc(g.nome)}</p>`;
+    html += items.map(p => productCard(p, calcFabricacao(p), 'fab')).join('');
+  });
+  return html;
 }
 function renderRevenda() {
   if (!state.revenda.length) return emptyState('Nenhum produto de revenda', 'Toque no + para precificar um produto comprado pronto.');
@@ -538,12 +582,25 @@ function productCard(p, calc, tipo) {
   const metaLine = tipo === 'fab'
     ? `Atual ${fmtR(p.precoAtual)} · Custo ${fmtR(calc.custoTotal)}${calc.rendimento > 1 ? ` (rende ${calc.rendimento})` : ''}`
     : `Atual ${fmtR(p.precoAtual)} · Ideal ${fmtR(calc.precoIdeal)}`;
+  let reorder = '';
+  if (tipo === 'fab') {
+    const siblings = state.fabricacao.filter(x => (x.categoriaId || null) === (p.categoriaId || null));
+    const idx = siblings.findIndex(x => x.id === p.id);
+    reorder = `
+      <div class="reorder-col">
+        <button class="reorder-btn btn-move" data-dir="up" data-id="${p.id}" ${idx <= 0 ? 'disabled' : ''} aria-label="Mover para cima">▲</button>
+        <button class="reorder-btn btn-move" data-dir="down" data-id="${p.id}" ${idx >= siblings.length - 1 ? 'disabled' : ''} aria-label="Mover para baixo">▼</button>
+      </div>`;
+  }
   return `
     <div class="item" data-kind="${tipo}" data-id="${p.id}" style="align-items:flex-start; flex-direction:column; gap:8px;">
       <div class="row-between" style="width:100%">
-        <div class="info">
-          <div class="name">${esc(p.nome)}</div>
-          <div class="meta">${metaLine}</div>
+        <div style="display:flex; gap:10px; align-items:center; min-width:0; flex:1;">
+          ${reorder}
+          <div class="info">
+            <div class="name">${esc(p.nome)}</div>
+            <div class="meta">${metaLine}</div>
+          </div>
         </div>
         <div style="display:flex; gap:6px; flex-shrink:0;">
           <button class="icon-btn btn-dup" data-kind="${tipo}" data-id="${p.id}" aria-label="Duplicar">${dupIcon()}</button>
@@ -583,6 +640,14 @@ function attachListEvents() {
       duplicateProduto(kind, id);
     });
   });
+  document.querySelectorAll('.btn-move').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      moveProduto(btn.dataset.id, btn.dataset.dir);
+    });
+  });
+  const btnManageCat = document.getElementById('btn-manage-cat');
+  if (btnManageCat) btnManageCat.addEventListener('click', openCategoriasSheet);
   document.querySelectorAll('.item[data-kind]').forEach(el => {
     el.addEventListener('click', () => {
       const { kind, id } = el.dataset;
@@ -610,6 +675,88 @@ function duplicateProduto(kind, id) {
   list.push(copy);
   saveState(); render();
   openProdutoSheet(kind, copy.id);
+}
+function moveProduto(id, direction) {
+  const list = state.fabricacao;
+  const item = list.find(p => p.id === id);
+  if (!item) return;
+  const cat = item.categoriaId || null;
+  const siblings = list.filter(p => (p.categoriaId || null) === cat);
+  const idx = siblings.findIndex(p => p.id === id);
+  const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+  if (swapIdx < 0 || swapIdx >= siblings.length) return;
+  const other = siblings[swapIdx];
+  const realIdxA = list.indexOf(item);
+  const realIdxB = list.indexOf(other);
+  [list[realIdxA], list[realIdxB]] = [list[realIdxB], list[realIdxA]];
+  saveState(); render();
+}
+
+/* ---------------- Categorias de produção ---------------- */
+function openCategoriasSheet() {
+  function listHtml() {
+    if (!state.categoriasProducao.length) return `<p class="helper-note">Nenhuma categoria criada ainda.</p>`;
+    return state.categoriasProducao.map((c, idx) => `
+      <div class="cat-row" data-id="${c.id}">
+        <div class="reorder-col">
+          <button class="reorder-btn cat-move" data-dir="up" data-id="${c.id}" ${idx === 0 ? 'disabled' : ''}>▲</button>
+          <button class="reorder-btn cat-move" data-dir="down" data-id="${c.id}" ${idx === state.categoriasProducao.length - 1 ? 'disabled' : ''}>▼</button>
+        </div>
+        <div class="cat-name">${esc(c.nome)}</div>
+        <button class="icon-btn cat-rename" data-id="${c.id}" aria-label="Renomear">✏️</button>
+        <button class="icon-btn cat-del" data-id="${c.id}" aria-label="Excluir">${trashIcon()}</button>
+      </div>`).join('');
+  }
+  function refresh() {
+    document.getElementById('cat-list').innerHTML = listHtml();
+    wireRows();
+  }
+  function wireRows() {
+    document.querySelectorAll('.cat-move').forEach(btn => {
+      btn.onclick = () => {
+        const cats = state.categoriasProducao;
+        const idx = cats.findIndex(c => c.id === btn.dataset.id);
+        const swap = btn.dataset.dir === 'up' ? idx - 1 : idx + 1;
+        if (swap < 0 || swap >= cats.length) return;
+        [cats[idx], cats[swap]] = [cats[swap], cats[idx]];
+        saveState(); refresh();
+      };
+    });
+    document.querySelectorAll('.cat-rename').forEach(btn => {
+      btn.onclick = () => {
+        const c = state.categoriasProducao.find(x => x.id === btn.dataset.id);
+        const novo = prompt('Novo nome da categoria:', c.nome);
+        if (novo && novo.trim()) { c.nome = novo.trim(); saveState(); refresh(); }
+      };
+    });
+    document.querySelectorAll('.cat-del').forEach(btn => {
+      btn.onclick = () => {
+        if (!confirm('Excluir esta categoria? As produções dela voltam para "Sem categoria".')) return;
+        const id = btn.dataset.id;
+        state.categoriasProducao = state.categoriasProducao.filter(c => c.id !== id);
+        state.fabricacao.forEach(p => { if (p.categoriaId === id) p.categoriaId = null; });
+        saveState(); refresh();
+      };
+    });
+  }
+  openSheet(`
+    <h2>Categorias de Produção</h2>
+    <p class="sheet-sub">Organize suas fichas técnicas em grupos, como Cookies, Bolos, Salgados.</p>
+    <div id="cat-list">${listHtml()}</div>
+    <button class="add-ing-btn" id="btn-add-cat" style="margin-top:12px;">+ nova categoria</button>
+    <div class="btn-row" style="margin-top:16px">
+      <button class="btn primary" id="btn-close-cat" style="flex:1">Concluído</button>
+    </div>
+  `);
+  wireRows();
+  document.getElementById('btn-close-cat').onclick = () => { closeSheet(); render(); };
+  document.getElementById('btn-add-cat').onclick = () => {
+    const nome = prompt('Nome da nova categoria:');
+    if (nome && nome.trim()) {
+      state.categoriasProducao.push({ id: uid(), nome: nome.trim() });
+      saveState(); refresh();
+    }
+  };
 }
 function confirmDelete(kind, id) {
   const map = {
@@ -699,6 +846,8 @@ function openProdutoSheet(tipo, id) {
   if (isFab && !draft.rendimento) draft.rendimento = 1;
   if (isFab && !draft.adicionais) draft.adicionais = [];
 
+  if (isFab && draft.categoriaId === undefined) draft.categoriaId = null;
+
   function ingredientsHtml() {
     return draft.ingredientes.map((ing, idx) => `
       <div class="ing-row" data-idx="${idx}">
@@ -755,6 +904,12 @@ function openProdutoSheet(tipo, id) {
       <div class="field"><label>Nome do produto</label><input id="f-nome" value="${esc(draft.nome)}" placeholder="Ex: Cookie Bar Tradicional"></div>
 
       ${isFab ? `
+        <div class="field"><label>Categoria</label>
+          <select id="f-categoria">
+            <option value="">Sem categoria</option>
+            ${state.categoriasProducao.map(c => `<option value="${c.id}" ${c.id === draft.categoriaId ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}
+          </select>
+        </div>
         <p class="section-title" style="margin-top:6px">Ingredientes (quantidades da receita inteira)</p>
         <div id="ing-list">${ingredientsHtml()}</div>
         <button class="add-ing-btn" id="btn-add-ing">+ adicionar insumo</button>
@@ -799,6 +954,7 @@ function openProdutoSheet(tipo, id) {
         rerenderAdicionais();
       };
       document.getElementById('f-rendimento').oninput = e => { draft.rendimento = Math.max(1, Number(e.target.value || 1)); refreshSummary(); };
+      document.getElementById('f-categoria').onchange = e => { draft.categoriaId = e.target.value || null; };
       wireIngredientRows();
       wireAdicionalRows();
     } else {
