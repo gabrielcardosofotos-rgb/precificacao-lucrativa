@@ -254,6 +254,19 @@
     background:var(--gold); color:#fff; border:none; border-radius:8px; padding:8px 12px;
     font-size:12px; font-weight:600; flex-shrink:0; cursor:pointer;
   }
+
+  /* ---------- Centered confirm/prompt modal (replaces native dialogs) ---------- */
+  .confirm-backdrop{
+    position:absolute; inset:0; background:rgba(27,42,34,.5);
+    display:none; align-items:center; justify-content:center; z-index:30; padding:24px;
+  }
+  .confirm-backdrop.open{display:flex;}
+  .confirm-card{
+    background:var(--bg); border-radius:18px; padding:20px; width:100%; max-width:320px;
+    box-shadow:0 14px 40px rgba(0,0,0,.28);
+  }
+  .confirm-card h2{margin:0 0 6px; font-size:17px;}
+  .confirm-card .sheet-sub{margin-bottom:16px;}
 </style>
 </head>
 <body>
@@ -295,6 +308,10 @@
 
   <div class="sheet-backdrop" id="sheet-backdrop">
     <div class="sheet" id="sheet-content"></div>
+  </div>
+
+  <div class="confirm-backdrop" id="confirm-backdrop">
+    <div class="confirm-card" id="confirm-card"></div>
   </div>
 </div>
 
@@ -725,17 +742,19 @@ function openCategoriasSheet() {
     document.querySelectorAll('.cat-rename').forEach(btn => {
       btn.onclick = () => {
         const c = state.categoriasProducao.find(x => x.id === btn.dataset.id);
-        const novo = prompt('Novo nome da categoria:', c.nome);
-        if (novo && novo.trim()) { c.nome = novo.trim(); saveState(); refresh(); }
+        customPrompt('Renomear categoria', 'Novo nome da categoria:', c.nome, novo => {
+          c.nome = novo; saveState(); refresh();
+        });
       };
     });
     document.querySelectorAll('.cat-del').forEach(btn => {
       btn.onclick = () => {
-        if (!confirm('Excluir esta categoria? As produções dela voltam para "Sem categoria".')) return;
-        const id = btn.dataset.id;
-        state.categoriasProducao = state.categoriasProducao.filter(c => c.id !== id);
-        state.fabricacao.forEach(p => { if (p.categoriaId === id) p.categoriaId = null; });
-        saveState(); refresh();
+        customConfirm('Excluir categoria', 'As produções dela voltam para "Sem categoria". Deseja continuar?', () => {
+          const id = btn.dataset.id;
+          state.categoriasProducao = state.categoriasProducao.filter(c => c.id !== id);
+          state.fabricacao.forEach(p => { if (p.categoriaId === id) p.categoriaId = null; });
+          saveState(); refresh();
+        });
       };
     });
   }
@@ -751,11 +770,10 @@ function openCategoriasSheet() {
   wireRows();
   document.getElementById('btn-close-cat').onclick = () => { closeSheet(); render(); };
   document.getElementById('btn-add-cat').onclick = () => {
-    const nome = prompt('Nome da nova categoria:');
-    if (nome && nome.trim()) {
-      state.categoriasProducao.push({ id: uid(), nome: nome.trim() });
+    customPrompt('Nova categoria', 'Nome da categoria:', '', nome => {
+      state.categoriasProducao.push({ id: uid(), nome });
       saveState(); refresh();
-    }
+    });
   };
 }
 function confirmDelete(kind, id) {
@@ -766,9 +784,10 @@ function confirmDelete(kind, id) {
   const list = map[kind];
   const idx = list.findIndex(x => x.id === id);
   if (idx === -1) return;
-  if (!confirm('Excluir este item?')) return;
-  list.splice(idx, 1);
-  saveState(); render();
+  customConfirm('Excluir item', 'Tem certeza que deseja excluir este item? Essa ação não pode ser desfeita.', () => {
+    list.splice(idx, 1);
+    saveState(); render();
+  });
 }
 
 /* ---------------- Sheet (modal) genérico ---------------- */
@@ -777,6 +796,53 @@ const sheetEl = document.getElementById('sheet-content');
 function openSheet(html) { sheetEl.innerHTML = html; backdrop.classList.add('open'); }
 function closeSheet() { backdrop.classList.remove('open'); sheetEl.innerHTML = ''; }
 backdrop.addEventListener('click', e => { if (e.target === backdrop) closeSheet(); });
+
+/* ---------------- Modal de confirmação/prompt (substitui alert/confirm/prompt nativos) ----------------
+   Nativos mostram "seudominio.com diz" — isso expõe o domínio/usuário de quem hospeda o app.
+   Por isso todo confirm/prompt/alert do app usa este modal próprio, sem essa exposição. */
+const confirmBackdrop = document.getElementById('confirm-backdrop');
+const confirmCard = document.getElementById('confirm-card');
+function openConfirmModal(html) { confirmCard.innerHTML = html; confirmBackdrop.classList.add('open'); }
+function closeConfirmModal() { confirmBackdrop.classList.remove('open'); confirmCard.innerHTML = ''; }
+confirmBackdrop.addEventListener('click', e => { if (e.target === confirmBackdrop) closeConfirmModal(); });
+
+function customConfirm(title, message, onYes) {
+  openConfirmModal(`
+    <h2>${esc(title)}</h2>
+    <p class="sheet-sub">${esc(message)}</p>
+    <div class="btn-row">
+      <button class="btn ghost" id="cc-cancel">Cancelar</button>
+      <button class="btn danger-ghost" id="cc-ok">Confirmar</button>
+    </div>`);
+  document.getElementById('cc-cancel').onclick = closeConfirmModal;
+  document.getElementById('cc-ok').onclick = () => { closeConfirmModal(); onYes(); };
+}
+function customPrompt(title, message, defaultValue, onSubmit) {
+  openConfirmModal(`
+    <h2>${esc(title)}</h2>
+    <p class="sheet-sub">${esc(message)}</p>
+    <div class="field"><input id="cp-input" value="${esc(defaultValue || '')}"></div>
+    <div class="btn-row">
+      <button class="btn ghost" id="cp-cancel">Cancelar</button>
+      <button class="btn primary" id="cp-ok">Salvar</button>
+    </div>`);
+  const inp = document.getElementById('cp-input');
+  setTimeout(() => { inp.focus(); inp.select(); }, 60);
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('cp-ok').click(); });
+  document.getElementById('cp-cancel').onclick = closeConfirmModal;
+  document.getElementById('cp-ok').onclick = () => {
+    const val = inp.value.trim();
+    closeConfirmModal();
+    if (val) onSubmit(val);
+  };
+}
+function customAlert(title, message) {
+  openConfirmModal(`
+    <h2>${esc(title)}</h2>
+    <p class="sheet-sub">${esc(message)}</p>
+    <div class="btn-row"><button class="btn primary" id="ca-ok" style="flex:1">Entendi</button></div>`);
+  document.getElementById('ca-ok').onclick = closeConfirmModal;
+}
 
 function openCustoSheet(type, id) {
   const isFixo = type === 'fixo';
@@ -944,12 +1010,12 @@ function openProdutoSheet(tipo, id) {
     document.getElementById('f-preco').oninput = e => { draft.precoAtual = Number(e.target.value || 0); refreshSummary(); };
     if (isFab) {
       document.getElementById('btn-add-ing').onclick = () => {
-        if (!state.insumos.length) { alert('Cadastre um insumo primeiro, na aba Insumos.'); return; }
+        if (!state.insumos.length) { customAlert('Nenhum insumo cadastrado', 'Cadastre um insumo primeiro, na aba Insumos.'); return; }
         draft.ingredientes.push({ insumoId: state.insumos[0].id, qtd: 0 });
         rerenderIngredients();
       };
       document.getElementById('btn-add-ad').onclick = () => {
-        if (!state.insumos.length) { alert('Cadastre um insumo primeiro, na aba Insumos.'); return; }
+        if (!state.insumos.length) { customAlert('Nenhum insumo cadastrado', 'Cadastre um insumo primeiro, na aba Insumos.'); return; }
         draft.adicionais.push({ insumoId: state.insumos[0].id, qtd: 0 });
         rerenderAdicionais();
       };
@@ -961,7 +1027,7 @@ function openProdutoSheet(tipo, id) {
       document.getElementById('f-custo').oninput = e => { draft.custoCompra = Number(e.target.value || 0); refreshSummary(); };
     }
     document.getElementById('btn-save').onclick = () => {
-      if (!draft.nome.trim()) { alert('Dê um nome ao produto.'); return; }
+      if (!draft.nome.trim()) { customAlert('Nome obrigatório', 'Dê um nome ao produto antes de salvar.'); return; }
       if (item) Object.assign(item, draft); else list.push(draft);
       saveState(); closeSheet(); render();
     };
