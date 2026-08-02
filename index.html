@@ -161,6 +161,7 @@
   }
   .stamp.ok{color:var(--success); background:var(--success-soft);}
   .stamp.bad{color:var(--danger); background:var(--danger-soft);}
+  .stamp.sm{padding:2px 8px; font-size:9.5px; border-width:1.5px; transform:none;}
 
   .row-between{display:flex; align-items:center; justify-content:space-between;}
 
@@ -267,6 +268,29 @@
   }
   .confirm-card h2{margin:0 0 6px; font-size:17px;}
   .confirm-card .sheet-sub{margin-bottom:16px;}
+
+  /* ---------- Onboarding ---------- */
+  .onboard-overlay{
+    position:absolute; inset:0; background:var(--primary); z-index:50;
+    display:none; flex-direction:column; padding:calc(env(safe-area-inset-top,0px) + 28px) 26px calc(env(safe-area-inset-bottom,0px) + 26px);
+    color:#fff;
+  }
+  .onboard-overlay.open{display:flex;}
+  .onboard-skip{
+    align-self:flex-end; background:none; border:none; color:rgba(255,255,255,.7);
+    font-size:13px; font-weight:600; padding:6px; cursor:pointer;
+  }
+  .onboard-body{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:16px;}
+  .onboard-emoji{font-size:52px; line-height:1;}
+  .onboard-body h2{font-size:23px; margin:0; font-weight:600;}
+  .onboard-body p{font-size:14.5px; line-height:1.6; color:rgba(255,255,255,.85); max-width:320px; margin:0;}
+  .onboard-dots{display:flex; gap:7px; justify-content:center; margin:22px 0 18px;}
+  .onboard-dot{width:7px; height:7px; border-radius:50%; background:rgba(255,255,255,.3);}
+  .onboard-dot.active{background:var(--gold); width:20px; border-radius:4px;}
+  .onboard-next{
+    background:var(--gold); color:#fff; border:none; border-radius:12px;
+    padding:15px; font-size:15px; font-weight:700; width:100%; cursor:pointer;
+  }
 </style>
 </head>
 <body>
@@ -313,6 +337,8 @@
   <div class="confirm-backdrop" id="confirm-backdrop">
     <div class="confirm-card" id="confirm-card"></div>
   </div>
+
+  <div class="onboard-overlay" id="onboard-overlay"></div>
 </div>
 
 <script>
@@ -327,6 +353,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 
 const DEFAULT_STATE = {
   producaoMensal: 3000,
+  valorHora: 20,
   custosFixos: [
     { id: uid(), desc: 'Aluguel', valor: 1800 },
     { id: uid(), desc: 'Energia elétrica', valor: 420 },
@@ -334,9 +361,9 @@ const DEFAULT_STATE = {
     { id: uid(), desc: 'Salários e encargos', valor: 3200 },
   ],
   taxas: [
-    { id: uid(), desc: 'Simples Nacional', pct: 0.06 },
-    { id: uid(), desc: 'Taxa de cartão/maquininha', pct: 0.025 },
-    { id: uid(), desc: 'iFood / Marketplaces', pct: 0.12 },
+    { id: uid(), desc: 'Simples Nacional', pct: 0.06, canal: 'ambos' },
+    { id: uid(), desc: 'Taxa de cartão/maquininha', pct: 0.025, canal: 'presencial' },
+    { id: uid(), desc: 'iFood / Marketplaces', pct: 0.12, canal: 'delivery' },
   ],
   insumos: [
     { id: uid(), nome: 'Farinha de trigo', unidade: 'kg', qtdEmbalagem: 1, precoCompra: 5.2 },
@@ -370,12 +397,35 @@ function saveState() {
 /* ---------------- cálculos ---------------- */
 function totalFixo() { return state.custosFixos.reduce((s, c) => s + Number(c.valor || 0), 0); }
 function rateio() { const p = Number(state.producaoMensal || 0); return p > 0 ? totalFixo() / p : 0; }
-function totalTaxas() { return state.taxas.reduce((s, t) => s + Number(t.pct || 0), 0); }
+function totalTaxasCanal(canal) {
+  return state.taxas.reduce((s, t) => {
+    const c = t.canal || 'ambos';
+    return (c === 'ambos' || c === canal) ? s + Number(t.pct || 0) : s;
+  }, 0);
+}
+function totalTaxas() { return totalTaxasCanal('presencial'); } // mantido p/ compatibilidade (usa canal presencial)
 function insumoById(id) { return state.insumos.find(i => i.id === id); }
 function custoUnitInsumo(insumo) {
   if (!insumo) return 0;
   const q = Number(insumo.qtdEmbalagem || 0);
   return q > 0 ? Number(insumo.precoCompra || 0) / q : 0;
+}
+
+function calcCanalCustoTotal(custoTotal, margem, atual, canal) {
+  const tax = totalTaxasCanal(canal);
+  const denom = 1 - Number(margem || 0) - tax;
+  const precoIdeal = denom > 0 ? custoTotal / denom : 0;
+  const a = Number(atual || 0);
+  return { tax, precoIdeal, atual: a, resultado: a - custoTotal, lucroUnit: a - custoTotal - a * tax,
+           status: a >= precoIdeal ? 'ok' : 'bad' };
+}
+function calcCanalPrecoIdeal(custoTotal, margem, atual, canal) {
+  const tax = totalTaxasCanal(canal);
+  const denom = 1 - Number(margem || 0) - tax;
+  const precoIdeal = denom > 0 ? custoTotal / denom : 0;
+  const a = Number(atual || 0);
+  return { tax, precoIdeal, atual: a, resultado: a - precoIdeal, lucroUnit: a - custoTotal - a * tax,
+           status: a >= precoIdeal ? 'ok' : 'bad' };
 }
 
 function calcFabricacao(prod) {
@@ -389,32 +439,35 @@ function calcFabricacao(prod) {
     const ins = insumoById(ad.insumoId);
     return s + custoUnitInsumo(ins) * Number(ad.qtd || 0);
   }, 0); // já é por unidade, não divide pelo rendimento
-  const subtotal = custoBase + custoAdicionais;
+  const custoMaoDeObra = ((Number(prod.tempoProducaoMin || 0) / 60) * Number(state.valorHora || 0)) / rendimento;
+  const subtotal = custoBase + custoAdicionais + custoMaoDeObra;
   const rt = rateio();
   const custoTotal = subtotal + rt;
-  const tax = totalTaxas();
-  const denom = 1 - Number(prod.margem || 0) - tax;
-  const precoIdeal = denom > 0 ? custoTotal / denom : 0;
-  const atual = Number(prod.precoAtual || 0);
-  const resultado = atual - custoTotal; // resultado (atual vs. custo total de produção)
-  const lucroUnit = atual - custoTotal - atual * tax;
+  const margem = Number(prod.margem || 0);
+  const presencial = calcCanalCustoTotal(custoTotal, margem, prod.precoAtual, 'presencial');
+  const delivery = calcCanalCustoTotal(custoTotal, margem, prod.precoAtualDelivery, 'delivery');
   const custoVariavel = subtotal;
-  const margemContrib = atual - custoVariavel - atual * tax;
-  return { subtotalReceita, rendimento, custoBase, custoAdicionais, subtotal, rateio: rt, custoTotal, precoIdeal, resultado, lucroUnit, margemContrib,
-           status: atual >= precoIdeal ? 'ok' : 'bad' };
+  const margemContrib = presencial.atual - custoVariavel - presencial.atual * presencial.tax;
+  return {
+    subtotalReceita, rendimento, custoBase, custoAdicionais, custoMaoDeObra, subtotal, rateio: rt, custoTotal,
+    // campos "planos" abaixo usam o canal presencial como referência (compatibilidade com Dashboard/cartão)
+    precoIdeal: presencial.precoIdeal, resultado: presencial.resultado, lucroUnit: presencial.lucroUnit,
+    margemContrib, status: presencial.status,
+    canais: { presencial, delivery },
+  };
 }
 function calcRevenda(prod) {
   const rt = rateio();
   const custoTotal = Number(prod.custoCompra || 0) + rt;
-  const tax = totalTaxas();
-  const denom = 1 - Number(prod.margem || 0) - tax;
-  const precoIdeal = denom > 0 ? custoTotal / denom : 0;
-  const atual = Number(prod.precoAtual || 0);
-  const resultado = atual - precoIdeal;
-  const lucroUnit = atual - custoTotal - atual * tax;
-  const margemContrib = atual - Number(prod.custoCompra || 0) - atual * tax;
-  return { custoTotal, precoIdeal, resultado, lucroUnit, margemContrib,
-           status: atual >= precoIdeal ? 'ok' : 'bad' };
+  const margem = Number(prod.margem || 0);
+  const presencial = calcCanalPrecoIdeal(custoTotal, margem, prod.precoAtual, 'presencial');
+  const delivery = calcCanalPrecoIdeal(custoTotal, margem, prod.precoAtualDelivery, 'delivery');
+  const margemContrib = presencial.atual - Number(prod.custoCompra || 0) - presencial.atual * presencial.tax;
+  return {
+    custoTotal, precoIdeal: presencial.precoIdeal, resultado: presencial.resultado,
+    lucroUnit: presencial.lucroUnit, margemContrib, status: presencial.status,
+    canais: { presencial, delivery },
+  };
 }
 
 function allProducts() {
@@ -518,11 +571,16 @@ function renderRankList(list, valueFn, color) {
 
 /* ---------------- Custos ---------------- */
 function renderCustos() {
+  const canalLabel = { ambos: 'Ambos os canais', presencial: 'Só presencial', delivery: 'Só delivery' };
   return `
     <div class="card">
-      <div class="field" style="margin-bottom:0">
+      <div class="field" style="margin-bottom:12px">
         <label>Produção mensal estimada (unidades)</label>
         <input type="number" id="inp-producao" value="${state.producaoMensal}" inputmode="numeric">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>Valor da sua hora de trabalho (R$)</label>
+        <input type="number" id="inp-valorhora" step="0.01" value="${state.valorHora}" inputmode="decimal">
       </div>
     </div>
 
@@ -540,9 +598,13 @@ function renderCustos() {
       </div>`).join('') || emptyRow('Nenhum custo fixo cadastrado.')}
 
     <p class="section-title">Taxas e impostos (%)</p>
+    <p class="helper-note" style="margin-top:-6px">Marque se a taxa vale pra venda presencial, delivery, ou os dois — isso separa o preço ideal por canal.</p>
     ${state.taxas.map(t => `
       <div class="item" data-kind="taxa" data-id="${t.id}">
-        <div class="info"><div class="name">${esc(t.desc)}</div></div>
+        <div class="info">
+          <div class="name">${esc(t.desc)}</div>
+          <div class="meta">${canalLabel[t.canal || 'ambos']}</div>
+        </div>
         <div class="price">${fmtPct(t.pct)}</div>
         <button class="icon-btn btn-del" data-kind="taxa" data-id="${t.id}" aria-label="Excluir">${trashIcon()}</button>
       </div>`).join('') || emptyRow('Nenhuma taxa cadastrada.')}
@@ -595,10 +657,20 @@ function renderRevenda() {
   if (!state.revenda.length) return emptyState('Nenhum produto de revenda', 'Toque no + para precificar um produto comprado pronto.');
   return state.revenda.map(p => productCard(p, calcRevenda(p), 'rev')).join('');
 }
+function channelRow(label, c) {
+  return `
+    <div class="row-between" style="width:100%; padding:2px 0;">
+      <span style="font-size:12px; color:var(--ink-soft);">${label} <b class="num" style="color:var(--ink);">${fmtR(c.atual)}</b></span>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span class="stamp sm ${c.status}">${c.status === 'ok' ? 'OK' : 'Ajustar'}</span>
+        <span class="price" style="font-size:12.5px;">${c.resultado >= 0 ? '▲' : '▼'} ${fmtR(Math.abs(c.resultado))}</span>
+      </div>
+    </div>`;
+}
 function productCard(p, calc, tipo) {
   const metaLine = tipo === 'fab'
-    ? `Atual ${fmtR(p.precoAtual)} · Custo ${fmtR(calc.custoTotal)}${calc.rendimento > 1 ? ` (rende ${calc.rendimento})` : ''}`
-    : `Atual ${fmtR(p.precoAtual)} · Ideal ${fmtR(calc.precoIdeal)}`;
+    ? `Custo ${fmtR(calc.custoTotal)}${calc.rendimento > 1 ? ` (rende ${calc.rendimento})` : ''}`
+    : `Custo ${fmtR(calc.custoTotal)}`;
   let reorder = '';
   if (tipo === 'fab') {
     const siblings = state.fabricacao.filter(x => (x.categoriaId || null) === (p.categoriaId || null));
@@ -610,7 +682,7 @@ function productCard(p, calc, tipo) {
       </div>`;
   }
   return `
-    <div class="item" data-kind="${tipo}" data-id="${p.id}" style="align-items:flex-start; flex-direction:column; gap:8px;">
+    <div class="item" data-kind="${tipo}" data-id="${p.id}" style="align-items:flex-start; flex-direction:column; gap:6px;">
       <div class="row-between" style="width:100%">
         <div style="display:flex; gap:10px; align-items:center; min-width:0; flex:1;">
           ${reorder}
@@ -624,9 +696,9 @@ function productCard(p, calc, tipo) {
           <button class="icon-btn btn-del" data-kind="${tipo}" data-id="${p.id}" aria-label="Excluir">${trashIcon()}</button>
         </div>
       </div>
-      <div class="row-between" style="width:100%">
-        <span class="stamp ${calc.status}">${calc.status === 'ok' ? 'Dentro da margem' : 'Ajustar preço'}</span>
-        <span class="price">${tipo === 'fab' ? 'Lucro ' : ''}${calc.resultado >= 0 ? '▲ ' : '▼ '}${fmtR(Math.abs(calc.resultado))}</span>
+      <div style="width:100%; border-top:1px dashed var(--line); padding-top:6px;">
+        ${channelRow('🏠 Presencial', calc.canais.presencial)}
+        ${channelRow('🛵 Delivery', calc.canais.delivery)}
       </div>
     </div>`;
 }
@@ -676,7 +748,9 @@ function attachListEvents() {
     });
   });
   const inpProd = document.getElementById('inp-producao');
-  if (inpProd) inpProd.addEventListener('input', e => { state.producaoMensal = Number(e.target.value || 0); saveState(); render(); });
+  if (inpProd) inpProd.addEventListener('change', e => { state.producaoMensal = Number(e.target.value || 0); saveState(); render(); });
+  const inpHora = document.getElementById('inp-valorhora');
+  if (inpHora) inpHora.addEventListener('change', e => { state.valorHora = Number(e.target.value || 0); saveState(); render(); });
 }
 function duplicateProduto(kind, id) {
   const list = kind === 'fab' ? state.fabricacao : state.revenda;
@@ -854,6 +928,14 @@ function openCustoSheet(type, id) {
     <div class="field"><label>Descrição</label><input id="f-desc" value="${item ? esc(item.desc) : ''}" placeholder="${isFixo ? 'Ex: Aluguel' : 'Ex: Simples Nacional'}"></div>
     <div class="field"><label>${isFixo ? 'Valor mensal (R$)' : 'Percentual (%)'}</label>
       <input id="f-val" type="number" step="0.01" inputmode="decimal" value="${item ? (isFixo ? item.valor : item.pct * 100) : ''}"></div>
+    ${!isFixo ? `
+      <div class="field"><label>Vale para qual canal de venda?</label>
+        <select id="f-canal">
+          <option value="ambos" ${(!item || (item.canal || 'ambos') === 'ambos') ? 'selected' : ''}>Ambos (presencial e delivery)</option>
+          <option value="presencial" ${item && item.canal === 'presencial' ? 'selected' : ''}>Só presencial</option>
+          <option value="delivery" ${item && item.canal === 'delivery' ? 'selected' : ''}>Só delivery</option>
+        </select>
+      </div>` : ''}
     <div class="btn-row">
       <button class="btn ghost" id="btn-cancel">Cancelar</button>
       <button class="btn primary" id="btn-save">Salvar</button>
@@ -863,11 +945,12 @@ function openCustoSheet(type, id) {
   document.getElementById('btn-save').onclick = () => {
     const desc = document.getElementById('f-desc').value.trim() || (isFixo ? 'Custo fixo' : 'Taxa');
     const raw = Number(document.getElementById('f-val').value || 0);
+    const canal = !isFixo ? document.getElementById('f-canal').value : undefined;
     if (item) {
       item.desc = desc;
-      if (isFixo) item.valor = raw; else item.pct = raw / 100;
+      if (isFixo) item.valor = raw; else { item.pct = raw / 100; item.canal = canal; }
     } else {
-      list.push(isFixo ? { id: uid(), desc, valor: raw } : { id: uid(), desc, pct: raw / 100 });
+      list.push(isFixo ? { id: uid(), desc, valor: raw } : { id: uid(), desc, pct: raw / 100, canal });
     }
     saveState(); closeSheet(); render();
   };
@@ -907,10 +990,12 @@ function openProdutoSheet(tipo, id) {
   const list = isFab ? state.fabricacao : state.revenda;
   const item = id ? list.find(x => x.id === id) : null;
   const draft = item ? structuredClone(item) : (isFab
-    ? { id: uid(), nome: '', precoAtual: 0, margem: 0.3, rendimento: 1, ingredientes: [], adicionais: [] }
-    : { id: uid(), nome: '', custoCompra: 0, margem: 0.3, precoAtual: 0 });
+    ? { id: uid(), nome: '', precoAtual: 0, precoAtualDelivery: 0, margem: 0.3, rendimento: 1, tempoProducaoMin: 0, ingredientes: [], adicionais: [] }
+    : { id: uid(), nome: '', custoCompra: 0, margem: 0.3, precoAtual: 0, precoAtualDelivery: 0 });
   if (isFab && !draft.rendimento) draft.rendimento = 1;
   if (isFab && !draft.adicionais) draft.adicionais = [];
+  if (isFab && draft.tempoProducaoMin === undefined) draft.tempoProducaoMin = 0;
+  if (draft.precoAtualDelivery === undefined) draft.precoAtualDelivery = 0;
 
   if (isFab && draft.categoriaId === undefined) draft.categoriaId = null;
 
@@ -944,23 +1029,33 @@ function openProdutoSheet(tipo, id) {
       [`Rendimento: ${calc.rendimento} unidade${calc.rendimento > 1 ? 's' : ''}`, `÷ ${calc.rendimento}`],
       ['Custo da receita por unidade', fmtR(calc.custoBase)],
       ...(draft.adicionais.length ? [['Adicionais por unidade', '+ ' + fmtR(calc.custoAdicionais)]] : []),
+      ...(Number(draft.tempoProducaoMin) > 0 ? [['Mão de obra por unidade', '+ ' + fmtR(calc.custoMaoDeObra)]] : []),
       ['Rateio de custos fixos (por un.)', fmtR(calc.rateio)],
       ['Custo total de produção (por un.)', fmtR(calc.custoTotal)],
     ] : [
       ['Rateio de custos fixos', fmtR(calc.rateio ?? rateio())],
       ['Custo total', fmtR(calc.custoTotal)],
     ];
-    const resultLabel = isFab ? 'Resultado (atual vs. custo total)' : 'Resultado (atual vs. ideal)';
+    const resultLabel = isFab ? 'Resultado vs. custo total' : 'Resultado vs. ideal';
+    function canalBlock(nome, c) {
+      return `
+        <div class="live-summary" style="margin-top:10px;">
+          <div class="lrow"><span>Canal</span><span>${nome}</span></div>
+          <div class="lrow total"><span>Preço ideal</span><span>${fmtR(c.precoIdeal)}</span></div>
+          <div class="lrow"><span>${resultLabel}</span>
+            <span style="color:${c.resultado >= 0 ? 'var(--success)' : 'var(--danger)'}">${c.resultado >= 0 ? '▲' : '▼'} ${fmtR(Math.abs(c.resultado))}</span></div>
+        </div>
+        <div style="text-align:center; margin:8px 0 4px;">
+          <span class="stamp ${c.status}">${c.status === 'ok' ? 'Dentro da margem' : 'Ajustar preço'}</span>
+        </div>`;
+    }
     return `
       <div class="live-summary">
         ${rows.map(([l, v]) => `<div class="lrow"><span>${l}</span><span>${v}</span></div>`).join('')}
-        <div class="lrow total"><span>Preço ideal de venda</span><span>${fmtR(calc.precoIdeal)}</span></div>
-        <div class="lrow"><span>${resultLabel}</span>
-          <span style="color:${calc.resultado >= 0 ? 'var(--success)' : 'var(--danger)'}">${calc.resultado >= 0 ? '▲' : '▼'} ${fmtR(Math.abs(calc.resultado))}</span></div>
       </div>
-      <div style="text-align:center; margin-bottom:14px;">
-        <span class="stamp ${calc.status}">${calc.status === 'ok' ? 'Dentro da margem' : 'Ajustar preço'}</span>
-      </div>`;
+      ${canalBlock('🏠 Presencial', calc.canais.presencial)}
+      ${canalBlock('🛵 Delivery', calc.canais.delivery)}
+    `;
   }
 
   function fullHtml() {
@@ -985,13 +1080,20 @@ function openProdutoSheet(tipo, id) {
         <p class="section-title">Adicionais por unidade (aplicado em cada fatia, não na forma toda)</p>
         <div id="ad-list">${adicionaisHtml()}</div>
         <button class="add-ing-btn" id="btn-add-ad">+ adicionar adicional</button>
+
+        <div class="field"><label>Tempo de produção (minutos, receita/forma inteira)</label>
+          <input id="f-tempo" type="number" step="1" min="0" inputmode="numeric" value="${draft.tempoProducaoMin}" placeholder="Ex: 40"></div>
       ` : `
         <div class="field"><label>Custo de compra (R$)</label><input id="f-custo" type="number" step="0.01" inputmode="decimal" value="${draft.custoCompra}"></div>
       `}
 
+      <div class="field">
+        <label>Margem desejada (%)</label>
+        <input id="f-margem" type="number" step="1" inputmode="decimal" value="${draft.margem * 100}">
+      </div>
       <div class="field-row">
-        <div class="field"><label>Margem desejada (%)</label><input id="f-margem" type="number" step="1" inputmode="decimal" value="${draft.margem * 100}"></div>
-        <div class="field"><label>Preço de venda atual (R$)</label><input id="f-preco" type="number" step="0.01" inputmode="decimal" value="${draft.precoAtual}"></div>
+        <div class="field"><label>🏠 Preço presencial (R$)</label><input id="f-preco" type="number" step="0.01" inputmode="decimal" value="${draft.precoAtual}"></div>
+        <div class="field"><label>🛵 Preço delivery (R$)</label><input id="f-preco-delivery" type="number" step="0.01" inputmode="decimal" value="${draft.precoAtualDelivery}"></div>
       </div>
 
       <div id="summary-slot">${summaryHtml()}</div>
@@ -1008,6 +1110,7 @@ function openProdutoSheet(tipo, id) {
     document.getElementById('f-nome').oninput = e => draft.nome = e.target.value;
     document.getElementById('f-margem').oninput = e => { draft.margem = Number(e.target.value || 0) / 100; refreshSummary(); };
     document.getElementById('f-preco').oninput = e => { draft.precoAtual = Number(e.target.value || 0); refreshSummary(); };
+    document.getElementById('f-preco-delivery').oninput = e => { draft.precoAtualDelivery = Number(e.target.value || 0); refreshSummary(); };
     if (isFab) {
       document.getElementById('btn-add-ing').onclick = () => {
         if (!state.insumos.length) { customAlert('Nenhum insumo cadastrado', 'Cadastre um insumo primeiro, na aba Insumos.'); return; }
@@ -1020,6 +1123,7 @@ function openProdutoSheet(tipo, id) {
         rerenderAdicionais();
       };
       document.getElementById('f-rendimento').oninput = e => { draft.rendimento = Math.max(1, Number(e.target.value || 1)); refreshSummary(); };
+      document.getElementById('f-tempo').oninput = e => { draft.tempoProducaoMin = Number(e.target.value || 0); refreshSummary(); };
       document.getElementById('f-categoria').onchange = e => { draft.categoriaId = e.target.value || null; };
       wireIngredientRows();
       wireAdicionalRows();
@@ -1094,11 +1198,15 @@ function openSettingsSheet() {
       <input type="file" id="f-import" accept="application/json">
     </div>
     <p class="helper-note" id="import-msg"></p>
+    <div class="btn-row" style="margin-bottom:10px">
+      <button class="btn ghost" id="btn-replay-tutorial">🎓 Ver tutorial novamente</button>
+    </div>
     <div class="btn-row">
       <button class="btn ghost" id="btn-close-settings">Fechar</button>
     </div>
   `);
   document.getElementById('btn-close-settings').onclick = closeSheet;
+  document.getElementById('btn-replay-tutorial').onclick = () => { closeSheet(); startOnboarding(); };
   document.getElementById('btn-export').onclick = () => {
     const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1179,6 +1287,52 @@ function openSettingsSheet() {
 })();
 
 setTab('dashboard');
+
+/* ---------------- Onboarding (tutorial de primeiro uso) ---------------- */
+const ONBOARD_KEY = 'precificacao-onboarding-v1-seen';
+const onboardSlides = [
+  { emoji: '💰', titulo: 'Bem-vindo à Precificação Lucrativa', texto: 'Um app pra você nunca mais vender no prejuízo sem perceber. Vamos te mostrar os 4 passos em 30 segundos.' },
+  { emoji: '🧾', titulo: '1. Custos e Insumos', texto: 'Lance seus custos fixos, taxas por canal (presencial/delivery) e cadastre seus ingredientes com preço de compra.' },
+  { emoji: '🍪', titulo: '2. Produção e Revenda', texto: 'Monte a ficha técnica da receita (ou precifique um produto pronto) e veja o preço ideal calculado na hora, por canal de venda.' },
+  { emoji: '📊', titulo: '3. Painel', texto: 'Acompanhe tudo: produtos mais lucrativos, ponto de equilíbrio e maior custo — tudo automático conforme você cadastra.' },
+  { emoji: '⚙️', titulo: 'Um lembrete', texto: 'Seus dados ficam salvos só neste aparelho. Exporte um backup de vez em quando no ícone de engrenagem, lá em cima.' },
+];
+let onboardIdx = 0;
+function startOnboarding() {
+  onboardIdx = 0;
+  renderOnboardSlide();
+  document.getElementById('onboard-overlay').classList.add('open');
+}
+function finishOnboarding() {
+  document.getElementById('onboard-overlay').classList.remove('open');
+  try { localStorage.setItem(ONBOARD_KEY, '1'); } catch (e) {}
+}
+function renderOnboardSlide() {
+  const s = onboardSlides[onboardIdx];
+  const isLast = onboardIdx === onboardSlides.length - 1;
+  document.getElementById('onboard-overlay').innerHTML = `
+    <button class="onboard-skip" id="ob-skip">Pular</button>
+    <div class="onboard-body">
+      <div class="onboard-emoji">${s.emoji}</div>
+      <h2>${esc(s.titulo)}</h2>
+      <p>${esc(s.texto)}</p>
+    </div>
+    <div class="onboard-dots">
+      ${onboardSlides.map((_, i) => `<div class="onboard-dot ${i === onboardIdx ? 'active' : ''}"></div>`).join('')}
+    </div>
+    <button class="onboard-next" id="ob-next">${isLast ? 'Começar a usar' : 'Próximo'}</button>
+  `;
+  document.getElementById('ob-skip').onclick = finishOnboarding;
+  document.getElementById('ob-next').onclick = () => {
+    if (isLast) { finishOnboarding(); return; }
+    onboardIdx++; renderOnboardSlide();
+  };
+}
+(function maybeStartOnboarding() {
+  let seen = null;
+  try { seen = localStorage.getItem(ONBOARD_KEY); } catch (e) {}
+  if (!seen) startOnboarding();
+})();
 </script>
 </body>
 </html>
