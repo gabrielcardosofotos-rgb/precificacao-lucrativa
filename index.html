@@ -419,14 +419,6 @@ function calcCanalCustoTotal(custoTotal, margem, atual, canal) {
   return { tax, precoIdeal, atual: a, resultado: a - custoTotal, lucroUnit: a - custoTotal - a * tax,
            status: a >= precoIdeal ? 'ok' : 'bad' };
 }
-function calcCanalPrecoIdeal(custoTotal, margem, atual, canal) {
-  const tax = totalTaxasCanal(canal);
-  const denom = 1 - Number(margem || 0) - tax;
-  const precoIdeal = denom > 0 ? custoTotal / denom : 0;
-  const a = Number(atual || 0);
-  return { tax, precoIdeal, atual: a, resultado: a - precoIdeal, lucroUnit: a - custoTotal - a * tax,
-           status: a >= precoIdeal ? 'ok' : 'bad' };
-}
 // Delivery: repassa a taxa do canal sobre o preço já praticado no presencial, em vez de recalcular
 // margem+taxa do zero. Isso preserva o mesmo lucro em R$ entre os canais — ver conversa com o Gabriel:
 // custo/(1-margem-taxa) faz margem e taxa disputarem a mesma fatia de 100% e explode quando as duas são altas.
@@ -472,7 +464,7 @@ function calcRevenda(prod) {
   const rt = rateio();
   const custoTotal = Number(prod.custoCompra || 0) + rt;
   const margem = Number(prod.margem || 0);
-  const presencial = calcCanalPrecoIdeal(custoTotal, margem, prod.precoAtual, 'presencial');
+  const presencial = calcCanalCustoTotal(custoTotal, margem, prod.precoAtual, 'presencial');
   const delivery = calcCanalDeliveryGrossUp(custoTotal, prod.precoAtual, presencial.precoIdeal, presencial.tax, prod.precoAtualDelivery, 'delivery');
   const margemContrib = presencial.atual - Number(prod.custoCompra || 0) - presencial.atual * presencial.tax;
   return {
@@ -1048,7 +1040,7 @@ function openProdutoSheet(tipo, id) {
       ['Rateio de custos fixos', fmtR(calc.rateio ?? rateio())],
       ['Custo total', fmtR(calc.custoTotal)],
     ];
-    const resultLabel = isFab ? 'Resultado vs. custo total' : 'Resultado vs. ideal';
+    const resultLabel = isFab ? 'Resultado vs. custo total' : 'Resultado vs. custo de compra';
     function canalBlock(nome, c, nota) {
       return `
         <div class="live-summary" style="margin-top:10px;">
