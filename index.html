@@ -399,8 +399,16 @@ function totalFixo() { return state.custosFixos.reduce((s, c) => s + Number(c.va
 function rateio() { const p = Number(state.producaoMensal || 0); return p > 0 ? totalFixo() / p : 0; }
 function totalTaxasCanal(canal) {
   return state.taxas.reduce((s, t) => {
+    if ((t.tipo || 'pct') !== 'pct') return s;
     const c = t.canal || 'ambos';
     return (c === 'ambos' || c === canal) ? s + Number(t.pct || 0) : s;
+  }, 0);
+}
+function taxaFixaCanal(canal) {
+  return state.taxas.reduce((s, t) => {
+    if (t.tipo !== 'fixo') return s;
+    const c = t.canal || 'ambos';
+    return (c === 'ambos' || c === canal) ? s + Number(t.valorFixo || 0) : s;
   }, 0);
 }
 function totalTaxas() { return totalTaxasCanal('presencial'); } // mantido p/ compatibilidade (usa canal presencial)
@@ -411,24 +419,34 @@ function custoUnitInsumo(insumo) {
   return q > 0 ? Number(insumo.precoCompra || 0) / q : 0;
 }
 
-function calcCanalCustoTotal(custoTotal, margem, atual, canal) {
+function calcCanalCustoTotal(custoTotalBase, margem, atual, canal) {
   const tax = totalTaxasCanal(canal);
+  const fixo = taxaFixaCanal(canal);
+  const custoTotal = custoTotalBase + fixo;
   const denom = 1 - Number(margem || 0) - tax;
   const precoIdeal = denom > 0 ? custoTotal / denom : 0;
   const a = Number(atual || 0);
-  return { tax, precoIdeal, atual: a, resultado: a - custoTotal, lucroUnit: a - custoTotal - a * tax,
+  const lucroUnit = a - custoTotal - a * tax;
+  return { tax, fixo, custoTotal, precoIdeal, atual: a, resultado: a - custoTotal, lucroUnit,
            status: a >= precoIdeal ? 'ok' : 'bad' };
 }
-// Delivery: repassa a taxa do canal sobre o preço já praticado no presencial, em vez de recalcular
-// margem+taxa do zero. Isso preserva o mesmo lucro em R$ entre os canais — ver conversa com o Gabriel:
-// custo/(1-margem-taxa) faz margem e taxa disputarem a mesma fatia de 100% e explode quando as duas são altas.
-function calcCanalDeliveryGrossUp(custoTotal, precoBasePresencial, precoIdealPresencial, taxPresencial, atualDelivery, canal) {
+// Delivery: repassa a taxa e a cobrança fixa do canal sobre o preço já praticado no presencial, em vez de
+// recalcular margem+taxa do zero. Isso preserva o mesmo lucro em R$ entre os canais — ver conversa com o
+// Gabriel: custo/(1-margem-taxa) faz margem e taxa disputarem a mesma fatia de 100% e explode quando as
+// duas são altas. "resultado" aqui já é líquido (depois de descontar a taxa percentual do canal), pra
+// mostrar quanto realmente sobra por unidade vendida no delivery.
+function calcCanalDeliveryGrossUp(custoTotalBase, precoBasePresencial, presencialCanal, atualDelivery, canal) {
   const tax = totalTaxasCanal(canal);
-  const base = Number(precoBasePresencial || 0) || precoIdealPresencial; // sem preço presencial ainda? usa o ideal como ponto de partida
+  const fixo = taxaFixaCanal(canal);
+  const custoTotal = custoTotalBase + fixo;
+  const base = Number(precoBasePresencial || 0) || presencialCanal.precoIdeal; // sem preço presencial ainda? usa o ideal como ponto de partida
   const denom = 1 - tax;
-  const precoIdeal = denom > 0 ? base * (1 - taxPresencial) / denom : 0;
+  const precoIdeal = denom > 0
+    ? (base * (1 - presencialCanal.tax) + (fixo - presencialCanal.fixo)) / denom
+    : 0;
   const a = Number(atualDelivery || 0);
-  return { tax, precoIdeal, atual: a, resultado: a - custoTotal, lucroUnit: a - custoTotal - a * tax,
+  const lucroUnit = a - custoTotal - a * tax;
+  return { tax, fixo, custoTotal, precoIdeal, atual: a, resultado: lucroUnit, lucroUnit,
            status: a >= precoIdeal ? 'ok' : 'bad' };
 }
 
@@ -446,14 +464,15 @@ function calcFabricacao(prod) {
   const custoMaoDeObra = ((Number(prod.tempoProducaoMin || 0) / 60) * Number(state.valorHora || 0)) / rendimento;
   const subtotal = custoBase + custoAdicionais + custoMaoDeObra;
   const rt = rateio();
-  const custoTotal = subtotal + rt;
+  const custoTotalBase = subtotal + rt; // custo comum aos dois canais (sem taxa fixa de canal ainda)
   const margem = Number(prod.margem || 0);
-  const presencial = calcCanalCustoTotal(custoTotal, margem, prod.precoAtual, 'presencial');
-  const delivery = calcCanalDeliveryGrossUp(custoTotal, prod.precoAtual, presencial.precoIdeal, presencial.tax, prod.precoAtualDelivery, 'delivery');
+  const presencial = calcCanalCustoTotal(custoTotalBase, margem, prod.precoAtual, 'presencial');
+  const delivery = calcCanalDeliveryGrossUp(custoTotalBase, prod.precoAtual, presencial, prod.precoAtualDelivery, 'delivery');
   const custoVariavel = subtotal;
   const margemContrib = presencial.atual - custoVariavel - presencial.atual * presencial.tax;
   return {
-    subtotalReceita, rendimento, custoBase, custoAdicionais, custoMaoDeObra, subtotal, rateio: rt, custoTotal,
+    subtotalReceita, rendimento, custoBase, custoAdicionais, custoMaoDeObra, subtotal, rateio: rt,
+    custoTotal: presencial.custoTotal, // compat: custo total "padrão" = canal presencial (sem taxa fixa de delivery)
     // campos "planos" abaixo usam o canal presencial como referência (compatibilidade com Dashboard/cartão)
     precoIdeal: presencial.precoIdeal, resultado: presencial.resultado, lucroUnit: presencial.lucroUnit,
     margemContrib, status: presencial.status,
@@ -462,13 +481,13 @@ function calcFabricacao(prod) {
 }
 function calcRevenda(prod) {
   const rt = rateio();
-  const custoTotal = Number(prod.custoCompra || 0) + rt;
+  const custoTotalBase = Number(prod.custoCompra || 0) + rt;
   const margem = Number(prod.margem || 0);
-  const presencial = calcCanalCustoTotal(custoTotal, margem, prod.precoAtual, 'presencial');
-  const delivery = calcCanalDeliveryGrossUp(custoTotal, prod.precoAtual, presencial.precoIdeal, presencial.tax, prod.precoAtualDelivery, 'delivery');
+  const presencial = calcCanalCustoTotal(custoTotalBase, margem, prod.precoAtual, 'presencial');
+  const delivery = calcCanalDeliveryGrossUp(custoTotalBase, prod.precoAtual, presencial, prod.precoAtualDelivery, 'delivery');
   const margemContrib = presencial.atual - Number(prod.custoCompra || 0) - presencial.atual * presencial.tax;
   return {
-    custoTotal, precoIdeal: presencial.precoIdeal, resultado: presencial.resultado,
+    custoTotal: presencial.custoTotal, precoIdeal: presencial.precoIdeal, resultado: presencial.resultado,
     lucroUnit: presencial.lucroUnit, margemContrib, status: presencial.status,
     canais: { presencial, delivery },
   };
@@ -601,15 +620,15 @@ function renderCustos() {
         <button class="icon-btn btn-del" data-kind="custo" data-id="${c.id}" aria-label="Excluir">${trashIcon()}</button>
       </div>`).join('') || emptyRow('Nenhum custo fixo cadastrado.')}
 
-    <p class="section-title">Taxas e impostos (%)</p>
-    <p class="helper-note" style="margin-top:-6px">Marque se a taxa vale pra venda presencial, delivery, ou os dois — isso separa o preço ideal por canal.</p>
+    <p class="section-title">Taxas e impostos</p>
+    <p class="helper-note" style="margin-top:-6px">Marque se a taxa vale pra venda presencial, delivery, ou os dois — isso separa o preço ideal por canal. Pode ser um percentual (%) do preço ou um valor fixo por pedido (ex: taxa de destaque no iFood).</p>
     ${state.taxas.map(t => `
       <div class="item" data-kind="taxa" data-id="${t.id}">
         <div class="info">
           <div class="name">${esc(t.desc)}</div>
           <div class="meta">${canalLabel[t.canal || 'ambos']}</div>
         </div>
-        <div class="price">${fmtPct(t.pct)}</div>
+        <div class="price">${t.tipo === 'fixo' ? fmtR(t.valorFixo) + '/pedido' : fmtPct(t.pct)}</div>
         <button class="icon-btn btn-del" data-kind="taxa" data-id="${t.id}" aria-label="Excluir">${trashIcon()}</button>
       </div>`).join('') || emptyRow('Nenhuma taxa cadastrada.')}
     <div style="height:8px"></div>
@@ -926,38 +945,72 @@ function openCustoSheet(type, id) {
   const isFixo = type === 'fixo';
   const list = isFixo ? state.custosFixos : state.taxas;
   const item = id ? list.find(x => x.id === id) : null;
-  openSheet(`
-    <h2>${item ? 'Editar' : 'Novo'} ${isFixo ? 'custo fixo' : 'taxa/imposto'}</h2>
-    <p class="sheet-sub">${isFixo ? 'Uma despesa fixa mensal do seu negócio.' : 'Um percentual cobrado sobre a venda.'}</p>
-    <div class="field"><label>Descrição</label><input id="f-desc" value="${item ? esc(item.desc) : ''}" placeholder="${isFixo ? 'Ex: Aluguel' : 'Ex: Simples Nacional'}"></div>
-    <div class="field"><label>${isFixo ? 'Valor mensal (R$)' : 'Percentual (%)'}</label>
-      <input id="f-val" type="number" step="0.01" inputmode="decimal" value="${item ? (isFixo ? item.valor : item.pct * 100) : ''}"></div>
-    ${!isFixo ? `
-      <div class="field"><label>Vale para qual canal de venda?</label>
-        <select id="f-canal">
-          <option value="ambos" ${(!item || (item.canal || 'ambos') === 'ambos') ? 'selected' : ''}>Ambos (presencial e delivery)</option>
-          <option value="presencial" ${item && item.canal === 'presencial' ? 'selected' : ''}>Só presencial</option>
-          <option value="delivery" ${item && item.canal === 'delivery' ? 'selected' : ''}>Só delivery</option>
-        </select>
-      </div>` : ''}
-    <div class="btn-row">
-      <button class="btn ghost" id="btn-cancel">Cancelar</button>
-      <button class="btn primary" id="btn-save">Salvar</button>
-    </div>
-  `);
-  document.getElementById('btn-cancel').onclick = closeSheet;
-  document.getElementById('btn-save').onclick = () => {
-    const desc = document.getElementById('f-desc').value.trim() || (isFixo ? 'Custo fixo' : 'Taxa');
-    const raw = Number(document.getElementById('f-val').value || 0);
-    const canal = !isFixo ? document.getElementById('f-canal').value : undefined;
-    if (item) {
-      item.desc = desc;
-      if (isFixo) item.valor = raw; else { item.pct = raw / 100; item.canal = canal; }
-    } else {
-      list.push(isFixo ? { id: uid(), desc, valor: raw } : { id: uid(), desc, pct: raw / 100, canal });
+  let tipoTaxa = item ? (item.tipo || 'pct') : 'pct';
+
+  function bodyHtml() {
+    const valLabel = isFixo ? 'Valor mensal (R$)' : (tipoTaxa === 'fixo' ? 'Valor por pedido (R$)' : 'Percentual (%)');
+    const valValue = item
+      ? (isFixo ? item.valor : (tipoTaxa === 'fixo' ? item.valorFixo : item.pct * 100))
+      : '';
+    return `
+      <div class="field"><label>Descrição</label><input id="f-desc" value="${item ? esc(item.desc) : ''}" placeholder="${isFixo ? 'Ex: Aluguel' : 'Ex: Simples Nacional'}"></div>
+      ${!isFixo ? `
+        <div class="field"><label>Tipo de cobrança</label>
+          <select id="f-tipo">
+            <option value="pct" ${tipoTaxa === 'pct' ? 'selected' : ''}>Percentual (%) do preço</option>
+            <option value="fixo" ${tipoTaxa === 'fixo' ? 'selected' : ''}>Valor fixo por pedido (R$)</option>
+          </select>
+        </div>` : ''}
+      <div class="field"><label id="f-val-label">${valLabel}</label>
+        <input id="f-val" type="number" step="0.01" inputmode="decimal" value="${valValue}"></div>
+      ${!isFixo ? `
+        <div class="field"><label>Vale para qual canal de venda?</label>
+          <select id="f-canal">
+            <option value="ambos" ${(!item || (item.canal || 'ambos') === 'ambos') ? 'selected' : ''}>Ambos (presencial e delivery)</option>
+            <option value="presencial" ${item && item.canal === 'presencial' ? 'selected' : ''}>Só presencial</option>
+            <option value="delivery" ${item && item.canal === 'delivery' ? 'selected' : ''}>Só delivery</option>
+          </select>
+        </div>` : ''}
+      <div class="btn-row">
+        <button class="btn ghost" id="btn-cancel">Cancelar</button>
+        <button class="btn primary" id="btn-save">Salvar</button>
+      </div>`;
+  }
+
+  function wire() {
+    document.getElementById('btn-cancel').onclick = closeSheet;
+    if (!isFixo) {
+      document.getElementById('f-tipo').onchange = e => {
+        tipoTaxa = e.target.value;
+        refresh();
+      };
     }
-    saveState(); closeSheet(); render();
-  };
+    document.getElementById('btn-save').onclick = () => {
+      const desc = document.getElementById('f-desc').value.trim() || (isFixo ? 'Custo fixo' : 'Taxa');
+      const raw = Number(document.getElementById('f-val').value || 0);
+      const canal = !isFixo ? document.getElementById('f-canal').value : undefined;
+      if (item) {
+        item.desc = desc;
+        if (isFixo) { item.valor = raw; }
+        else if (tipoTaxa === 'fixo') { item.tipo = 'fixo'; item.valorFixo = raw; item.canal = canal; delete item.pct; }
+        else { item.tipo = 'pct'; item.pct = raw / 100; item.canal = canal; delete item.valorFixo; }
+      } else {
+        list.push(isFixo
+          ? { id: uid(), desc, valor: raw }
+          : (tipoTaxa === 'fixo'
+            ? { id: uid(), desc, tipo: 'fixo', valorFixo: raw, canal }
+            : { id: uid(), desc, tipo: 'pct', pct: raw / 100, canal }));
+      }
+      saveState(); closeSheet(); render();
+    };
+  }
+  function refresh() {
+    openSheet(`<h2>${item ? 'Editar' : 'Novo'} ${isFixo ? 'custo fixo' : 'taxa/imposto'}</h2>
+    <p class="sheet-sub">${isFixo ? 'Uma despesa fixa mensal do seu negócio.' : 'Percentual do preço ou valor fixo cobrado por pedido.'}</p>
+    ${bodyHtml()}`);
+    wire();
+  }
+  refresh();
 }
 
 function openInsumoSheet(id) {
@@ -1040,11 +1093,12 @@ function openProdutoSheet(tipo, id) {
       ['Rateio de custos fixos', fmtR(calc.rateio ?? rateio())],
       ['Custo total', fmtR(calc.custoTotal)],
     ];
-    const resultLabel = isFab ? 'Resultado vs. custo total' : 'Resultado vs. custo de compra';
-    function canalBlock(nome, c, nota) {
+    const resultLabelPresencial = isFab ? 'Resultado vs. custo total' : 'Resultado vs. custo de compra';
+    function canalBlock(nome, c, resultLabel, nota) {
       return `
         <div class="live-summary" style="margin-top:10px;">
           <div class="lrow"><span>Canal</span><span>${nome}</span></div>
+          ${c.fixo > 0 ? `<div class="lrow"><span>Taxa fixa por pedido</span><span>+ ${fmtR(c.fixo)}</span></div>` : ''}
           <div class="lrow total"><span>Preço ideal</span><span>${fmtR(c.precoIdeal)}</span></div>
           <div class="lrow"><span>${resultLabel}</span>
             <span style="color:${c.resultado >= 0 ? 'var(--success)' : 'var(--danger)'}">${c.resultado >= 0 ? '▲' : '▼'} ${fmtR(Math.abs(c.resultado))}</span></div>
@@ -1058,8 +1112,9 @@ function openProdutoSheet(tipo, id) {
       <div class="live-summary">
         ${rows.map(([l, v]) => `<div class="lrow"><span>${l}</span><span>${v}</span></div>`).join('')}
       </div>
-      ${canalBlock('🏠 Presencial', calc.canais.presencial)}
-      ${canalBlock('🛵 Delivery', calc.canais.delivery, 'Calculado a partir do preço presencial + taxa do canal, pra manter o mesmo lucro em R$ nos dois canais.')}
+      ${canalBlock('🏠 Presencial', calc.canais.presencial, resultLabelPresencial)}
+      ${canalBlock('🛵 Delivery', calc.canais.delivery, 'Lucro líquido (já descontada a taxa do canal)',
+        'Preço calculado a partir do presencial + taxas do canal (percentual e fixa), pra manter o mesmo lucro em R$ nos dois canais.')}
     `;
   }
 
