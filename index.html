@@ -427,6 +427,18 @@ function calcCanalPrecoIdeal(custoTotal, margem, atual, canal) {
   return { tax, precoIdeal, atual: a, resultado: a - precoIdeal, lucroUnit: a - custoTotal - a * tax,
            status: a >= precoIdeal ? 'ok' : 'bad' };
 }
+// Delivery: repassa a taxa do canal sobre o preço já praticado no presencial, em vez de recalcular
+// margem+taxa do zero. Isso preserva o mesmo lucro em R$ entre os canais — ver conversa com o Gabriel:
+// custo/(1-margem-taxa) faz margem e taxa disputarem a mesma fatia de 100% e explode quando as duas são altas.
+function calcCanalDeliveryGrossUp(custoTotal, precoBasePresencial, precoIdealPresencial, taxPresencial, atualDelivery, canal) {
+  const tax = totalTaxasCanal(canal);
+  const base = Number(precoBasePresencial || 0) || precoIdealPresencial; // sem preço presencial ainda? usa o ideal como ponto de partida
+  const denom = 1 - tax;
+  const precoIdeal = denom > 0 ? base * (1 - taxPresencial) / denom : 0;
+  const a = Number(atualDelivery || 0);
+  return { tax, precoIdeal, atual: a, resultado: a - custoTotal, lucroUnit: a - custoTotal - a * tax,
+           status: a >= precoIdeal ? 'ok' : 'bad' };
+}
 
 function calcFabricacao(prod) {
   const subtotalReceita = prod.ingredientes.reduce((s, ing) => {
@@ -445,7 +457,7 @@ function calcFabricacao(prod) {
   const custoTotal = subtotal + rt;
   const margem = Number(prod.margem || 0);
   const presencial = calcCanalCustoTotal(custoTotal, margem, prod.precoAtual, 'presencial');
-  const delivery = calcCanalCustoTotal(custoTotal, margem, prod.precoAtualDelivery, 'delivery');
+  const delivery = calcCanalDeliveryGrossUp(custoTotal, prod.precoAtual, presencial.precoIdeal, presencial.tax, prod.precoAtualDelivery, 'delivery');
   const custoVariavel = subtotal;
   const margemContrib = presencial.atual - custoVariavel - presencial.atual * presencial.tax;
   return {
@@ -461,7 +473,7 @@ function calcRevenda(prod) {
   const custoTotal = Number(prod.custoCompra || 0) + rt;
   const margem = Number(prod.margem || 0);
   const presencial = calcCanalPrecoIdeal(custoTotal, margem, prod.precoAtual, 'presencial');
-  const delivery = calcCanalPrecoIdeal(custoTotal, margem, prod.precoAtualDelivery, 'delivery');
+  const delivery = calcCanalDeliveryGrossUp(custoTotal, prod.precoAtual, presencial.precoIdeal, presencial.tax, prod.precoAtualDelivery, 'delivery');
   const margemContrib = presencial.atual - Number(prod.custoCompra || 0) - presencial.atual * presencial.tax;
   return {
     custoTotal, precoIdeal: presencial.precoIdeal, resultado: presencial.resultado,
@@ -1037,7 +1049,7 @@ function openProdutoSheet(tipo, id) {
       ['Custo total', fmtR(calc.custoTotal)],
     ];
     const resultLabel = isFab ? 'Resultado vs. custo total' : 'Resultado vs. ideal';
-    function canalBlock(nome, c) {
+    function canalBlock(nome, c, nota) {
       return `
         <div class="live-summary" style="margin-top:10px;">
           <div class="lrow"><span>Canal</span><span>${nome}</span></div>
@@ -1045,6 +1057,7 @@ function openProdutoSheet(tipo, id) {
           <div class="lrow"><span>${resultLabel}</span>
             <span style="color:${c.resultado >= 0 ? 'var(--success)' : 'var(--danger)'}">${c.resultado >= 0 ? '▲' : '▼'} ${fmtR(Math.abs(c.resultado))}</span></div>
         </div>
+        ${nota ? `<p class="helper-note" style="margin:4px 2px 0;">${nota}</p>` : ''}
         <div style="text-align:center; margin:8px 0 4px;">
           <span class="stamp ${c.status}">${c.status === 'ok' ? 'Dentro da margem' : 'Ajustar preço'}</span>
         </div>`;
@@ -1054,9 +1067,10 @@ function openProdutoSheet(tipo, id) {
         ${rows.map(([l, v]) => `<div class="lrow"><span>${l}</span><span>${v}</span></div>`).join('')}
       </div>
       ${canalBlock('🏠 Presencial', calc.canais.presencial)}
-      ${canalBlock('🛵 Delivery', calc.canais.delivery)}
+      ${canalBlock('🛵 Delivery', calc.canais.delivery, 'Calculado a partir do preço presencial + taxa do canal, pra manter o mesmo lucro em R$ nos dois canais.')}
     `;
   }
+
 
   function fullHtml() {
     return `
